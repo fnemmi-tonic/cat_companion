@@ -9,6 +9,7 @@ import pandas as pd
 from glob import glob
 from nilearn.input_data import NiftiLabelsMasker
 from nilearn.image import load_img, math_img, resample_to_img
+from nilearn.plotting import plot_anat, show
 import numpy as np
 from nipype.interfaces.spm.preprocess import Normalize12, Coregister
 from nibabel import Nifti1Image
@@ -18,6 +19,8 @@ from warnings import warn
 from os import mkdir
 import os
 import warnings
+import matplotlib.pyplot as plt
+
 
 def check_for_multiple_match_ask_input(pattern):
     matches = sorted(glob(pattern))
@@ -182,8 +185,8 @@ class CatCompanion(object):
                
         Parameters
         ----------
-        deformation_fields_dir : abolute path of the directories were the deformation field(s) are stored
-        output_dir = absolute path of the directory where the warped atlas are to be written
+        original_atlases : list with abolute path(s) of the nifti file(s) of the atlas(es) to be registered
+        
         
         The function return number of atlases * number of deformation fields nii file named [atlas]_[subject]
         
@@ -195,6 +198,8 @@ class CatCompanion(object):
         for n, def_field in enumerate(def_fields):
             subject_name = Path(def_field).stem.split("iy_")[1]
             t1_file = check_for_multiple_match_ask_input("{}/*{}*".format(t1_dir, subject_name))
+            if t1_file is None:
+                continue
             print("working on subject {}, {}% treated".format(subject_name, round(((n + 1)/len(def_fields))*100, 2)))
             nrm.inputs.deformation_file = def_field
             nrm.inputs.jobtype = "write"
@@ -207,7 +212,36 @@ class CatCompanion(object):
                                 load_img(t1_file), interpolation = "nearest")
                 res_atlas.to_filename("{}/{}_{}.nii".format(self.atlas_dir, atlas_name, subject_name))
                 
-                
+     def plot_atlas_overlay(self, modality, atlas, ncols = 2):
+        """Show the alignment of a modality and an atlas in terminal for all subjects
+               
+        Parameters
+        ----------
+        modality : string, the modality that should be the background of the overlay, as it appears in the
+                   other_modalities directory
+        atlas: string, the atlas to be overlayed
+        ncols = number of columns to be used in the figure
+        """    
+        atlases = sorted(glob("{}/{}*".format(self.atlas_dir, atlas)))
+        mods = sorted(glob("{}/other_modalities/{}/r*".format(self.main_cat_dir, modality)))
+        
+
+        for a, m in zip(atlases, mods):
+            
+
+            subject_name = Path(a).stem.split("{}_".format(atlas))[1]
+            mod_image = load_img(m)
+            mod_array = mod_image.get_data()
+            mod_array[np.isnan(mod_array)] = 0
+            percs = np.percentile(mod_array, [1,99])
+            robust_range_mod_array = np.copy(mod_array)
+            robust_range_mod_array[np.logical_or(robust_range_mod_array < percs[0], robust_range_mod_array > percs[1])] = 0
+            display = plot_anat(Nifti1Image(robust_range_mod_array, mod_image.affine, mod_image.header),
+                                title = subject_name)
+            display.add_contours(a)
+            show()
+
+        
                 
     
      def mask_atlases(self, atlases_to_mask, tissue_for_masking, tissue_thr = .1):
@@ -242,6 +276,8 @@ class CatCompanion(object):
                 tissue_dir = str(Path(f).parents[1]) + "/mri"
                 atlas = load_img(f)
                 tissue_filename = check_for_multiple_match_ask_input("{}/{}{}*".format(tissue_dir, tissue_prefix, subject_name))
+                if tissue_filename is None:
+                    continue
                 tissue_image = load_img(tissue_filename)
                 tissue_image = math_img("i > {}".format(str(tissue_thr)), i = tissue_image)
                 tissue_array = tissue_image.get_data()
@@ -282,7 +318,7 @@ class CatCompanion(object):
             if source is None:
                 continue
             if source_modality == modalities:
-                file_to_check = "{}/r{}.nii".format(Path(source).parent,Path(source).stem)
+                file_to_check = "{}/r{}".format(Path(source).parent,Path(source).stem)
                 if isfile(file_to_check):
                     continue
             if modalities != source_modality:
@@ -331,7 +367,7 @@ class CatCompanion(object):
         masker = NiftiLabelsMasker(atlas)
         data = np.squeeze(masker.fit_transform([image_to_extract])).tolist()
         roi_csv = pd.read_csv("{}/{}.csv".format(self.atlases_csv_dir,Path(path_to_atlas).stem.split("_masked")[0]), sep = self.text_sep)
-        roi_names = roi_csv.loc[:,"ROIname"].values[roi_csv.loc[:,"ROIid"].isin(masker.labels_)]
+        roi_names = roi_csv.loc[:,"ROIname"].values[roi_csv.loc[:,"ROIid"].isin(np.round(masker.labels_))]
         extracted_line = [subject] + data
         cols = ["subject"] + list(roi_names)
         df = pd.DataFrame([extracted_line], columns = cols)
@@ -388,6 +424,7 @@ class CatCompanion(object):
                     if (atlas_filename is None) or (path_to_image is None):
                          continue
                     df_subject = self.extract_values_from_atlas(atlas_filename, path_to_image, subject)
+                    df_subject.columns = remove_duplicate_name_from_columns(df_subject.columns)
                     df = pd.concat([df, df_subject])
                     df.sort_values(by=["subject"])
                 csv_filename = "{}/{}_{}_{}_subjects.csv".format(self.main_cat_dir, atlas, modality, df.shape[0])
